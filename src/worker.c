@@ -55,7 +55,7 @@ static void handle_read(forge_cfg_t *cfg, forge_conn_t *c, int ep) {
       // reset buffer for next request (keep-alive)
       size_t remain = c->rlen - req.header_bytes;
       if (remain > 0) memmove(c->rbuf, c->rbuf + req.header_bytes, remain);
-      c->rlen = 0; // simple path: drop pipelined body; week-1 has no body
+      c->rlen = 0; // simple path
       break;
     } else if (n == 0) {
       c->keep_alive = false; break;

@@ -4,7 +4,7 @@ Forge is a minimal **NGINX-style** HTTP/1.1 static web server in **C**. It handl
 
 ## Architecture and Features
 - **Master + prefork workers:** a master process forks multiple workers.
-- **I/O model:** each worker runs a non-blocking **epoll** event loop and registers client sockets.
+- **I/O model:** each worker runs a non-blocking **epoll** event loop and registers non-blocking client sockets.
 - **Serving static files:** on requests, files are opened, verified, and zero-copy streamed with **`sendfile()`** (page cache → socket).
 - **Graceful shutdown:** on **SIGINT/SIGTERM**, a signal handler flips an atomic flag; workers stop accepting new connections, drain in-flight requests, and exit; the master reaps workers and closes the listener.
 - **SIGPIPE-safe writes**: the server ignores SIGPIPE so failed sends return EPIPE instead of killing the worker; we detect it and close the connection.

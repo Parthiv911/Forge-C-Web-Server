@@ -68,6 +68,9 @@ int http_send_static_file(int fd, const char *doc_root, const char *url_path, bo
       "Last-Modified: Thu, 01 Jan 1970 00:00:00 GMT\r\n"
       "\r\n",
       (long long)st.st_size, ctype, keep_alive ? "keep-alive" : "close");
+  
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_CORK, &one, sizeof(one));
   if (write(fd, hdr, (size_t)hn) < hn) { close(f); return -1; }
 
   off_t off = 0;
@@ -80,6 +83,8 @@ int http_send_static_file(int fd, const char *doc_root, const char *url_path, bo
     }
     remain -= n;
   }
+  int zero = 0;
+  setsockopt(fd, IPPROTO_TCP, TCP_CORK, &zero, sizeof(zero));
   close(f);
   return 0;
 }
