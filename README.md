@@ -1,44 +1,91 @@
 # Forge-C Web Server
 
-Forge is a minimal **NGINX-style** HTTP/1.1 static web server in **C**. It handles concurrent keep-alive connections using **prefork** worker processes, an **epoll**-based event loop, and zero-copy file streaming via **`sendfile()`**.
+Forge is a minimal **NGINX-style** HTTP/1.1 static web server in **C** benchmarked over ethernet (1000Mbps).
 
 ## Architecture and Features
-- **Master + prefork workers:** a master process forks multiple workers.
-- **I/O model:** each worker runs a non-blocking **epoll** event loop and registers non-blocking client sockets.
-- **Serving static files:** on requests, files are opened, verified, and zero-copy streamed with **`sendfile()`** (page cache → socket).
-- **Graceful shutdown:** on **SIGINT/SIGTERM**, a signal handler flips an atomic flag; workers stop accepting new connections, drain in-flight requests, and exit; the master reaps workers and closes the listener.
-- **SIGPIPE-safe writes**: the server ignores SIGPIPE so failed sends return EPIPE instead of killing the worker; we detect it and close the connection.
+- **Master + workers:** a master process with multiple workers.
+- **I/O model:** each worker runs a non-blocking **epoll** event loop and registers non-blocking client TCP sockets.
+- **Serving static files:** on HTTP GET requests, files are opened, verified, and streamed with **`sendfile()`**.
 
 ## Benchmarking
-Forge is benchmarked with `wrk`, plotting **RPS** and **latency** against response payload file size in a **closed-loop** setup (constant number of concurrent connections) for 15s each with 4.
+Forge is benchmarked with patched `wrk` over ethernet. **RPS** and **latency** statistics against response payload file size in a **closed-loop** setup is provided.
+
+Wrk patch: disabled "coordination ommision compensation (stats_correct())" to reflect raw, unmodified closed loop latency statistics. Stock wrk was adding synthetic latency observations to simulate arrival of requests during large latency spikes in serving pending request. This breaks the closed loop assumption. Patched `wrk` reports unmodified latency statistics.
+
+### Latency vs Payload Size
+
+![Latency vs payload size](latency_vs_size.png)
+
+### RPS vs Payload Size
+
+![RPS vs payload size](rps_vs_size.png)
 
 | file     | size_bytes | rps      | latency_avg_ms | latency_p99_ms |
-|----------|------------|----------|----------------|----------------|
-| 1k.bin   | 1,024      | 6,204.01 | 40.98          | 42.30          |
-| 2k.bin   | 2,048      | 6,207.79 | 40.98          | 42.34          |
-| 4k.bin   | 4,096      | 6,208.92 | 40.95          | 42.23          |
-| 8k.bin   | 8,192      | 6,203.08 | 40.99          | 42.32          |
-| 16k.bin  | 16,384     | 6,204.24 | 40.97          | 42.32          |
-| 32k.bin  | 32,768     | 6,196.89 | 41.05          | 42.50          |
-| 64k.bin  | 65,536     | 53,046.07| 2.63           | 5.38           |
-| 128k.bin | 131,072    | 38,295.71| 3.64           | 7.06           |
-| 256k.bin | 262,144    | 22,882.66| 5.80           | 11.21          |
-| 512k.bin | 524,288    | 12,757.29| 10.40          | 20.15          |
-| 1m.bin   | 1,048,576  | 6,587.37 | 20.28          | 39.32          |
+| -------- | ---------- | -------- | -------------- | -------------- |
+| 1k.bin   | 1,024      | 3,259.77 | 0.294          | 0.512          |
+| 2k.bin   | 2,048      | 2,527.44 | 0.384          | 0.624          |
+| 4k.bin   | 4,096      | 1,705.91 | 1.96           | 53.78          |
+| 8k.bin   | 8,192      | 390.69   | 28.00          | 200.22         |
+| 16k.bin  | 16,384     | 235.39   | 28.25          | 201.35         |
+| 32k.bin  | 32,768     | 125.06   | 28.75          | 206.06         |
+| 64k.bin  | 65,536     | 85.99    | 23.78          | 202.17         |
+| 128k.bin | 131,072    | 49.04    | 31.24          | 220.44         |
+| 256k.bin | 262,144    | 25.39    | 45.45          | 237.55         |
+| 512k.bin | 524,288    | 9.66     | 104.37         | 303.06         |
+| 1m.bin   | 1,048,576  | 4.06     | 244.15         | 502.81         |
 
 
 ## Quickstart
+
+### Server:
+1. Build:
+
 ```bash
-# Build
 make
+```
 
-# Create a simple page to serve
-mkdir -p public
-printf '<h1>forge up</h1>\n' > public/index.html
+2. Spin up server:
+```bash
+./forge -w 1 -l 0.0.0.0:8080 -r ./public
 
-# Run (4 workers, port 8080, serve ./public)
-./forge -w 4 -l 0.0.0.0:8080 -r ./public
+-w 1                 # one worker
+-l 0.0.0.0:8080      # listen on all network interfaces, port 8080
+-r ./public          # serve files from ./public
+```
 
-# In another terminal, test
-curl -i http://127.0.0.1:8080/
+3. From the client machine, verify the server is reachable:
+
+```bash
+curl -v http://192.168.50.1:8080/1k.bin -o /dev/null
+```
+### Client:
+
+1. Set up Python environment
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+2. Build patched wrk
+```
+./scripts/build_wrk.sh
+```
+This builds the vendored patched wrk binary at tools/wrk/wrk
+
+3. Configure benchmark target
+
+Edit scripts/bench.sh and set the server URL/IP:
+
+URL="http://192.168.50.1:8080"
+
+
+4. Run benchmark
+```bash
+./scripts/bench.sh
+```
+This writes benchmark results to perf/baseline.csv
+
+5. Generate plots
+```bash
+python3 scripts/plot.py
 ```
