@@ -10,15 +10,25 @@ Forge is a minimal **NGINX-style** HTTP/1.1 static web server in **C** benchmark
 ## Benchmarking
 Forge is benchmarked with patched `wrk` over ethernet. **RPS** and **latency** statistics against response payload file size in a **closed-loop** setup is provided.
 
-Wrk patch: disabled "coordination ommision compensation (stats_correct())" to reflect raw, unmodified closed loop latency statistics. Stock wrk was adding synthetic latency observations to simulate arrival of requests during large latency spikes in serving pending request. This breaks the closed loop assumption. Patched `wrk` reports unmodified latency statistics.
+`Wrk patch`: disabled "coordination ommision compensation (stats_correct())" to reflect raw, unmodified closed loop latency statistics. Stock wrk was adding synthetic latency observations to simulate arrival of requests during large latency spikes in serving pending request. This breaks the closed loop assumption. Patched `wrk` reports unmodified latency statistics.
 
-### Latency vs Payload Size
+This behaviour has been discussed by other members such as [upstream wrk issue #485](https://github.com/wg/wrk/issues/485) and [issue #438](https://github.com/wg/wrk/issues/438), which questions the correctness of wrk's coordinated-omission compensation.
 
-![Latency vs payload size](latency_vs_size.png)
-
-### RPS vs Payload Size
-
-![RPS vs payload size](rps_vs_size.png)
+## Benchmark Graphs
+<table>
+  <tr>
+    <td align="center"><b>Latency vs Payload Size</b></td>
+    <td align="center"><b>RPS vs Payload Size</b></td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="latency_vs_size.png" alt="Latency vs payload size" width="450"/>
+    </td>
+    <td align="center">
+      <img src="rps_vs_size.png" alt="RPS vs payload size" width="450"/>
+    </td>
+  </tr>
+</table>
 
 | file     | size_bytes | rps      | latency_avg_ms | latency_p99_ms |
 | -------- | ---------- | -------- | -------------- | -------------- |
