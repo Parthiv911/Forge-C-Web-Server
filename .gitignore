@@ -1,3 +1,4 @@
 forge
 *.o
 public/*.bin
+.venv/

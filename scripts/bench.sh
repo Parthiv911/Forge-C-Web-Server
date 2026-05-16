@@ -3,7 +3,8 @@ set -euo pipefail
 
 OUT_DIR="perf"
 CSV="$OUT_DIR/baseline.csv"
-URL="${1:-http://127.0.0.1:8080}"
+URL="${1:-http://192.168.50.1:8080}"
+WRK="${WRK:-./tools/wrk/wrk}"
 
 SIZES=("1k.bin" "2k.bin" "4k.bin" "8k.bin" "16k.bin" "32k.bin" "64k.bin" "128k.bin" "256k.bin" "512k.bin" "1m.bin")
 THREADS="${THREADS:-1}"
@@ -47,7 +48,7 @@ norm() {
 for f in "${SIZES[@]}"; do
   echo "Benchmarking $f ..."
 
-  RES=$(wrk -t"$THREADS" -c"$CONNS" -d"$DUR" --latency "$URL/$f")
+  RES=$("$WRK" -t"$THREADS" -c"$CONNS" -d"$DUR" --latency "$URL/$f")
 
   echo "===== RAW WRK OUTPUT for $f ====="
   echo "$RES"
