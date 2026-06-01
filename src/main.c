@@ -21,8 +21,8 @@ int main(int argc, char **argv) {
         return 1;
     }
   }
-
   cfg.listen_fd = forge_create_listener(cfg.listen_hostport);
+  cfg.control_fd = -1;
   forge_master_run(&cfg);
   return 0;
 }

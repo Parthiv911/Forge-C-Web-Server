@@ -1,0 +1,181 @@
+/*
+ * Minimal server-side timing only:
+ *   1) NIC IRQ -> epoll return
+ *   2) read() duration
+ *   3) sendfile64() duration
+ *   4) sendfile64 enter -> NIC TX handoff
+ *
+ * Usage:
+ *   sudo bpftrace nic_epoll_read_sendfile.bt <SERVER_PID>
+ *
+ * Change enp2s0 below if your NIC name is different.
+ */
+
+tracepoint:irq:irq_handler_entry
+/str(args->name) == "enp2s0"/
+{
+  @last_irq = nsecs;
+  @irq_seen = count();
+}
+
+/* epoll returned events after NIC IRQ */
+tracepoint:syscalls:sys_exit_epoll_wait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_seen = count();
+
+  if (@last_irq) {
+    @nic_irq_to_epoll_return_us = hist((nsecs - @last_irq) / 1000);
+    @nic_irq_to_epoll_return_avg_us = avg((nsecs - @last_irq) / 1000);
+    @nic_irq_to_epoll_return_max_us = max((nsecs - @last_irq) / 1000);
+    delete(@last_irq);
+  }
+}
+
+tracepoint:syscalls:sys_exit_epoll_pwait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_seen = count();
+
+  if (@last_irq) {
+    @nic_irq_to_epoll_return_us = hist((nsecs - @last_irq) / 1000);
+    @nic_irq_to_epoll_return_avg_us = avg((nsecs - @last_irq) / 1000);
+    @nic_irq_to_epoll_return_max_us = max((nsecs - @last_irq) / 1000);
+    delete(@last_irq);
+  }
+}
+
+/* If this tracepoint errors on your kernel, delete only this block. */
+tracepoint:syscalls:sys_exit_epoll_pwait2
+/pid == $1 && args->ret > 0/
+{
+  @epoll_seen = count();
+
+  if (@last_irq) {
+    @nic_irq_to_epoll_return_us = hist((nsecs - @last_irq) / 1000);
+    @nic_irq_to_epoll_return_avg_us = avg((nsecs - @last_irq) / 1000);
+    @nic_irq_to_epoll_return_max_us = max((nsecs - @last_irq) / 1000);
+    delete(@last_irq);
+  }
+}
+
+/* read() duration */
+tracepoint:syscalls:sys_enter_read
+/pid == $1/
+{
+  @read_start[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_read
+/pid == $1 && @read_start[tid]/
+{
+  @read_duration_us = hist((nsecs - @read_start[tid]) / 1000);
+  @read_duration_avg_us = avg((nsecs - @read_start[tid]) / 1000);
+  @read_duration_max_us = max((nsecs - @read_start[tid]) / 1000);
+  delete(@read_start[tid]);
+}
+
+/* sendfile64() duration + start of TX correlation */
+tracepoint:syscalls:sys_enter_sendfile64
+/pid == $1/
+{
+  @sendfile_start[tid] = nsecs;
+  @tx_sendfile_enter[tid] = nsecs;
+  @sendfile_seen = count();
+}
+
+tracepoint:syscalls:sys_exit_sendfile64
+/pid == $1 && @sendfile_start[tid]/
+{
+  @sendfile_duration_us = hist((nsecs - @sendfile_start[tid]) / 1000);
+  @sendfile_duration_avg_us = avg((nsecs - @sendfile_start[tid]) / 1000);
+  @sendfile_duration_max_us = max((nsecs - @sendfile_start[tid]) / 1000);
+  delete(@sendfile_start[tid]);
+}
+
+/* sendfile -> TCP/IP/NIC handoff. These are cumulative from sendfile enter. */
+kprobe:tcp_write_xmit
+/@tx_sendfile_enter[tid]/
+{
+  @sendfile_to_tcp_write_xmit_us = hist((nsecs - @tx_sendfile_enter[tid]) / 1000);
+  @tcp_write_xmit_seen = count();
+}
+
+kprobe:ip_queue_xmit
+/@tx_sendfile_enter[tid]/
+{
+  @sendfile_to_ip_queue_xmit_us = hist((nsecs - @tx_sendfile_enter[tid]) / 1000);
+}
+
+kprobe:ip_local_out
+/@tx_sendfile_enter[tid]/
+{
+  @sendfile_to_ip_local_out_us = hist((nsecs - @tx_sendfile_enter[tid]) / 1000);
+}
+
+/* qdisc/netdev enqueue */
+tracepoint:net:net_dev_queue
+/@tx_sendfile_enter[tid]/
+{
+  @sendfile_to_net_dev_queue_us = hist((nsecs - @tx_sendfile_enter[tid]) / 1000);
+}
+
+/* driver start_xmit handoff */
+tracepoint:net:net_dev_start_xmit
+/@tx_sendfile_enter[tid]/
+{
+  @sendfile_to_net_dev_start_xmit_us = hist((nsecs - @tx_sendfile_enter[tid]) / 1000);
+}
+
+/* netdev xmit completion tracepoint; not physical wire completion */
+tracepoint:net:net_dev_xmit
+/@tx_sendfile_enter[tid]/
+{
+  @sendfile_to_net_dev_xmit_us = hist((nsecs - @tx_sendfile_enter[tid]) / 1000);
+
+  delete(@tx_sendfile_enter[tid]);
+}
+
+interval:s:10
+{
+  printf("\n=== minimal server-side timings, cumulative ===\n");
+
+  printf("\n[0] counts\n");
+  printf("NIC IRQs seen:\n");
+  print(@irq_seen);
+  printf("epoll wakeups seen:\n");
+  print(@epoll_seen);
+  printf("sendfile calls seen:\n");
+  print(@sendfile_seen);
+  printf("tcp_write_xmit seen:\n");
+  print(@tcp_write_xmit_seen);
+
+  printf("\n[1] NIC IRQ -> epoll return\n");
+  print(@nic_irq_to_epoll_return_us);
+  print(@nic_irq_to_epoll_return_avg_us);
+  print(@nic_irq_to_epoll_return_max_us);
+
+  printf("\n[2] read() duration\n");
+  print(@read_duration_us);
+  print(@read_duration_avg_us);
+  print(@read_duration_max_us);
+
+  printf("\n[3] sendfile64() duration\n");
+  print(@sendfile_duration_us);
+  print(@sendfile_duration_avg_us);
+  print(@sendfile_duration_max_us);
+
+  printf("\n[4] sendfile64 enter -> TX/NIC path, cumulative\n");
+  printf("sendfile -> tcp_write_xmit:\n");
+  print(@sendfile_to_tcp_write_xmit_us);
+  printf("sendfile -> ip_queue_xmit:\n");
+  print(@sendfile_to_ip_queue_xmit_us);
+  printf("sendfile -> ip_local_out:\n");
+  print(@sendfile_to_ip_local_out_us);
+  printf("sendfile -> net_dev_queue:\n");
+  print(@sendfile_to_net_dev_queue_us);
+  printf("sendfile -> net_dev_start_xmit:\n");
+  print(@sendfile_to_net_dev_start_xmit_us);
+  printf("sendfile -> net_dev_xmit:\n");
+  print(@sendfile_to_net_dev_xmit_us);
+}

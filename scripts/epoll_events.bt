@@ -1,0 +1,24 @@
+#!/usr/bin/env bpftrace
+
+tracepoint:syscalls:sys_exit_epoll_wait
+/pid == $1 && args->ret > 0/
+{
+    @epoll_wakeups = count();
+    @events_per_wakeup = hist(args->ret);
+}
+
+tracepoint:syscalls:sys_exit_epoll_pwait
+/pid == $1 && args->ret > 0/
+{
+    @epoll_wakeups = count();
+    @events_per_wakeup = hist(args->ret);
+}
+
+interval:s:10
+{
+    printf("\n=== cumulative epoll wakeups with >=1 event ===\n");
+    print(@epoll_wakeups);
+
+    printf("\n=== cumulative events returned per epoll wakeup ===\n");
+    print(@events_per_wakeup);
+}

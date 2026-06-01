@@ -11,25 +11,56 @@ static void conn_close(forge_conn_t *c, int ep) {
   }
   free(c);
 }
-
 static void accept_loop(int ep, int lfd) {
-  for (;;) {
-    struct sockaddr_in cli; socklen_t sl = sizeof(cli);
+  const int MAX_ACCEPT_BATCH = 1;
+  int accepted = 0;
+
+  while (accepted < MAX_ACCEPT_BATCH) {
+    struct sockaddr_in cli;
+    socklen_t sl = sizeof(cli);
+
     int cfd = accept4(lfd, (struct sockaddr *)&cli, &sl, SOCK_NONBLOCK);
     if (cfd < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) break;
       if (errno == EINTR) continue;
       break;
     }
+
+    accepted++;
+
     forge_conn_t *c = calloc(1, sizeof(*c));
-    c->fd = cfd; c->rlen = 0; c->keep_alive = true;
+    c->fd = cfd;
+    c->rlen = 0;
+    c->keep_alive = true;
 
     struct epoll_event ev = {0};
     ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
     ev.data.ptr = c;
-    if (epoll_ctl(ep, EPOLL_CTL_ADD, cfd, &ev) < 0) { close(cfd); free(c); }
+
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, cfd, &ev) < 0) {
+      close(cfd);
+      free(c);
+    }
   }
 }
+// static void accept_loop(int ep, int lfd) {
+//   for (;;) {
+//     struct sockaddr_in cli; socklen_t sl = sizeof(cli);
+//     int cfd = accept4(lfd, (struct sockaddr *)&cli, &sl, SOCK_NONBLOCK);
+//     if (cfd < 0) {
+//       if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+//       if (errno == EINTR) continue;
+//       break;
+//     }
+//     forge_conn_t *c = calloc(1, sizeof(*c));
+//     c->fd = cfd; c->rlen = 0; c->keep_alive = true;
+
+//     struct epoll_event ev = {0};
+//     ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
+//     ev.data.ptr = c;
+//     if (epoll_ctl(ep, EPOLL_CTL_ADD, cfd, &ev) < 0) { close(cfd); free(c); }
+//   }
+// }
 
 static void handle_read(forge_cfg_t *cfg, forge_conn_t *c, int ep) {
   for (;;) {
@@ -72,28 +103,157 @@ void forge_run_worker(forge_cfg_t *cfg, int widx) {
   int ep = epoll_create1(EPOLL_CLOEXEC);
   if (ep < 0) forge_die("epoll_create1: %s", strerror(errno));
 
+  static int control_marker;
+
   struct epoll_event ev = {0};
   ev.events = EPOLLIN;
-  ev.data.ptr = NULL;
-  if (epoll_ctl(ep, EPOLL_CTL_ADD, cfg->listen_fd, &ev) < 0) forge_die("epoll_ctl ADD listen: %s", strerror(errno));
+  ev.data.ptr = &control_marker;
+
+  if (epoll_ctl(ep, EPOLL_CTL_ADD, cfg->control_fd, &ev) < 0)
+    forge_die("epoll_ctl ADD control_fd: %s", strerror(errno));
 
   forge_log("[worker %d] started pid=%d", widx, getpid());
 
   while (!atomic_load(&g_terminate)) {
     struct epoll_event events[MAX_EVENTS];
-    int n = epoll_wait(ep, events, MAX_EVENTS, 1000);
+
+    int n = epoll_wait(ep, events, MAX_EVENTS, 0);
+
     if (n < 0) {
       if (errno == EINTR) continue;
       break;
     }
+
+    if (n == 0) {
+      continue;   
+    }
+
     for (int i = 0; i < n; i++) {
-      if (events[i].data.ptr == NULL) { accept_loop(ep, cfg->listen_fd); continue; }
+      if (events[i].data.ptr == &control_marker) {
+        for (;;) {
+          int cfd = forge_recv_fd(cfg->control_fd);
+          if (cfd < 0) break;
+
+          forge_set_nonblock(cfd);
+
+          forge_conn_t *c = calloc(1, sizeof(*c));
+          if (!c) {
+            close(cfd);
+            continue;
+          }
+
+          c->fd = cfd;
+          c->rlen = 0;
+          c->keep_alive = true;
+
+          struct epoll_event cev = {0};
+          cev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
+          cev.data.ptr = c;
+
+          if (epoll_ctl(ep, EPOLL_CTL_ADD, cfd, &cev) < 0) {
+            close(cfd);
+            free(c);
+          }
+        }
+
+        continue;
+      }
+
       forge_conn_t *c = (forge_conn_t *)events[i].data.ptr;
-      if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) { conn_close(c, ep); continue; }
-      if (events[i].events & EPOLLIN) { handle_read(cfg, c, ep); }
+
+      if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+        conn_close(c, ep);
+        continue;
+      }
+
+      if (events[i].events & EPOLLIN) {
+        handle_read(cfg, c, ep);
+      }
     }
   }
 
+  close(cfg->control_fd);
   close(ep);
   forge_log("[worker %d] exit", widx);
 }
+
+// void forge_run_worker(forge_cfg_t *cfg, int widx) {
+//   int ep = epoll_create1(EPOLL_CLOEXEC);
+//   if (ep < 0) forge_die("epoll_create1: %s", strerror(errno));
+
+//   struct epoll_event ev = {0};
+//   ev.events = EPOLLIN;
+//   ev.data.ptr = NULL;
+//   if (epoll_ctl(ep, EPOLL_CTL_ADD, cfg->listen_fd, &ev) < 0) forge_die("epoll_ctl ADD listen: %s", strerror(errno));
+
+//   forge_log("[worker %d] started pid=%d", widx, getpid());
+
+//   while (!atomic_load(&g_terminate)) {
+//     struct epoll_event events[MAX_EVENTS];
+//     int n = epoll_wait(ep, events, MAX_EVENTS, 1000);
+//     if (n < 0) {
+//       if (errno == EINTR) continue;
+//       break;
+//     }
+//     for (int i = 0; i < n; i++) {
+//       if (events[i].data.ptr == NULL) { accept_loop(ep, cfg->listen_fd); continue; }
+//       forge_conn_t *c = (forge_conn_t *)events[i].data.ptr;
+//       if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) { conn_close(c, ep); continue; }
+//       if (events[i].events & EPOLLIN) { handle_read(cfg, c, ep); }
+//     }
+//   }
+
+//   close(ep);
+//   forge_log("[worker %d] exit", widx);
+// }
+
+// void forge_run_worker(forge_cfg_t *cfg, int widx) {
+//   cfg->listen_fd = forge_create_listener(cfg->listen_hostport);
+//   int ep = epoll_create1(EPOLL_CLOEXEC);
+//   if (ep < 0) forge_die("epoll_create1: %s", strerror(errno));
+
+//   struct epoll_event ev = {0};
+//   ev.events = EPOLLIN;
+//   ev.data.ptr = NULL;
+//   if (epoll_ctl(ep, EPOLL_CTL_ADD, cfg->listen_fd, &ev) < 0)
+//     forge_die("epoll_ctl ADD listen: %s", strerror(errno));
+
+//   forge_log("[worker %d] started pid=%d", widx, getpid());
+
+//   while (!atomic_load(&g_terminate)) {
+//     struct epoll_event events[MAX_EVENTS];
+
+//     int n = epoll_wait(ep, events, MAX_EVENTS, 0);
+
+//     if (n < 0) {
+//       if (errno == EINTR) continue;
+//       break;
+//     }
+
+//     if (n == 0) {
+//       continue;   // always spin, never sleep
+//     }
+
+//     for (int i = 0; i < n; i++) {
+//       if (events[i].data.ptr == NULL) {
+//         accept_loop(ep, cfg->listen_fd);
+//         continue;
+//       }
+
+//       forge_conn_t *c = (forge_conn_t *)events[i].data.ptr;
+
+//       if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+//         conn_close(c, ep);
+//         continue;
+//       }
+
+//       if (events[i].events & EPOLLIN) {
+//         handle_read(cfg, c, ep);
+//       }
+//     }
+//   }
+//   close(cfg->listen_fd);
+//   close(ep);
+//   forge_log("[worker %d] exit", widx);
+// }
+

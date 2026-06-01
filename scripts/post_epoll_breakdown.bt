@@ -1,0 +1,116 @@
+tracepoint:syscalls:sys_exit_epoll_wait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_ret[tid] = nsecs;
+  @epoll_seen = count();
+}
+
+tracepoint:syscalls:sys_exit_epoll_pwait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_ret[tid] = nsecs;
+  @epoll_seen = count();
+}
+
+/* epoll return -> read enter */
+tracepoint:syscalls:sys_enter_read
+/pid == $1 && @epoll_ret[tid]/
+{
+  @epoll_to_read_us = hist((nsecs - @epoll_ret[tid]) / 1000);
+  @read_start[tid] = nsecs;
+  delete(@epoll_ret[tid]);
+}
+
+/* read syscall duration */
+tracepoint:syscalls:sys_exit_read
+/pid == $1 && @read_start[tid]/
+{
+  @read_us = hist((nsecs - @read_start[tid]) / 1000);
+  @read_exit[tid] = nsecs;
+  delete(@read_start[tid]);
+}
+
+/* read exit -> openat enter = parsing / routing / user code */
+tracepoint:syscalls:sys_enter_openat
+/pid == $1 && @read_exit[tid]/
+{
+  @read_to_openat_us = hist((nsecs - @read_exit[tid]) / 1000);
+  @openat_start[tid] = nsecs;
+  delete(@read_exit[tid]);
+}
+
+/* openat duration */
+tracepoint:syscalls:sys_exit_openat
+/pid == $1 && @openat_start[tid]/
+{
+  @openat_us = hist((nsecs - @openat_start[tid]) / 1000);
+  @openat_exit[tid] = nsecs;
+  delete(@openat_start[tid]);
+}
+
+/* openat exit -> fstat enter */
+tracepoint:syscalls:sys_enter_newfstatat
+/pid == $1 && @openat_exit[tid]/
+{
+  @openat_to_fstat_us = hist((nsecs - @openat_exit[tid]) / 1000);
+  @fstat_start[tid] = nsecs;
+  delete(@openat_exit[tid]);
+}
+
+/* fstat duration */
+tracepoint:syscalls:sys_exit_newfstatat
+/pid == $1 && @fstat_start[tid]/
+{
+  @fstat_us = hist((nsecs - @fstat_start[tid]) / 1000);
+  @fstat_exit[tid] = nsecs;
+  delete(@fstat_start[tid]);
+}
+
+/* fstat exit -> sendfile enter */tracepoint:syscalls:sys_enter_sendfile64
+/pid == $1 && @fstat_exit[tid]/
+{
+  @fstat_to_sendfile_us = hist((nsecs - @fstat_exit[tid]) / 1000);
+  @sendfile_start[tid] = nsecs;
+  delete(@fstat_exit[tid]);
+}
+
+/* sendfile duration */
+tracepoint:syscalls:sys_exit_sendfile64
+/pid == $1 && @sendfile_start[tid]/
+{
+  @sendfile_us = hist((nsecs - @sendfile_start[tid]) / 1000);
+  @sendfile_exit[tid] = nsecs;
+  delete(@sendfile_start[tid]);
+}
+
+interval:s:10
+{
+  printf("\n=== post-epoll cumulative breakdown ===\n");
+
+  printf("\nepoll return -> read enter:\n");
+  print(@epoll_to_read_us);
+
+  printf("\nread syscall duration:\n");
+  print(@read_us);
+
+  printf("\nread exit -> openat enter, user parsing/routing:\n");
+  print(@read_to_openat_us);
+
+  printf("\nopenat duration:\n");
+  print(@openat_us);
+
+  printf("\nopenat exit -> fstat enter:\n");
+  print(@openat_to_fstat_us);
+
+  printf("\nfstat duration:\n");
+  print(@fstat_us);
+
+  printf("\nfstat exit -> sendfile enter:\n");
+  print(@fstat_to_sendfile_us);
+
+  printf("\nsendfile duration:\n");
+  print(@sendfile_us);
+
+  printf("\nepoll wakeups seen:\n");
+  print(@epoll_seen);
+}

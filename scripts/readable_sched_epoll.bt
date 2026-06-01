@@ -1,0 +1,67 @@
+kprobe:sock_def_readable
+{
+  @last_readable = nsecs;
+}
+
+tracepoint:sched:sched_wakeup
+/args->pid == $1/
+{
+  if (@last_readable) {
+    @readable_to_sched_wakeup_us = hist((nsecs - @last_readable) / 1000);
+  }
+
+  @wakeup_ts[args->pid] = nsecs;
+}
+
+tracepoint:sched:sched_switch
+/args->next_pid == $1 && @wakeup_ts[args->next_pid]/
+{
+  @sched_wakeup_to_run_us = hist((nsecs - @wakeup_ts[args->next_pid]) / 1000);
+  @run_ts[args->next_pid] = nsecs;
+  delete(@wakeup_ts[args->next_pid]);
+}
+
+tracepoint:syscalls:sys_exit_epoll_wait
+/pid == $1 && args->ret > 0/
+{
+  if (@run_ts[pid]) {
+    @run_to_epoll_return_us = hist((nsecs - @run_ts[pid]) / 1000);
+    delete(@run_ts[pid]);
+  }
+
+  if (@last_readable) {
+    @readable_to_epoll_us = hist((nsecs - @last_readable) / 1000);
+    delete(@last_readable);
+  }
+}
+
+tracepoint:syscalls:sys_exit_epoll_pwait
+/pid == $1 && args->ret > 0/
+{
+  if (@run_ts[pid]) {
+    @run_to_epoll_return_us = hist((nsecs - @run_ts[pid]) / 1000);
+    delete(@run_ts[pid]);
+  }
+
+  if (@last_readable) {
+    @readable_to_epoll_us = hist((nsecs - @last_readable) / 1000);
+    delete(@last_readable);
+  }
+}
+
+interval:s:10
+{
+  printf("\n=== socket readable -> scheduling -> epoll return ===\n");
+
+  printf("\n[1] sock_def_readable -> sched_wakeup Forge:\n");
+  print(@readable_to_sched_wakeup_us);
+
+  printf("\n[2] sched_wakeup Forge -> sched_switch to Forge:\n");
+  print(@sched_wakeup_to_run_us);
+
+  printf("\n[3] Forge running -> epoll return:\n");
+  print(@run_to_epoll_return_us);
+
+  printf("\n[4] sock_def_readable -> epoll return total:\n");
+  print(@readable_to_epoll_us);
+}

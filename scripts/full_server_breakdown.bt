@@ -1,0 +1,264 @@
+tracepoint:irq:irq_handler_entry
+/str(args->name) == "enp2s0"/
+{
+  @last_irq = nsecs;
+  @irq_seen = count();
+}
+
+/*
+ * RX TCP receive path.
+ * Approximate global correlation. Use single worker / low background traffic.
+ */
+kprobe:tcp_v4_rcv
+{
+  @last_tcp_rx = nsecs;
+  @tcp_v4_rcv_seen = count();
+}
+
+kprobe:sock_def_readable
+/@last_tcp_rx/
+{
+  @tcp_rx_to_sock_readable_us = hist((nsecs - @last_tcp_rx) / 1000);
+  @tcp_rx_to_sock_readable_avg_us = avg((nsecs - @last_tcp_rx) / 1000);
+  @tcp_rx_to_sock_readable_max_us = max((nsecs - @last_tcp_rx) / 1000);
+
+  @last_sock_readable = nsecs;
+  @sock_readable_seen = count();
+
+  delete(@last_tcp_rx);
+}
+
+tracepoint:syscalls:sys_exit_epoll_wait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_seen = count();
+
+  if (@last_irq) {
+    @irq_to_epoll_us = hist((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_avg_us = avg((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_max_us = max((nsecs - @last_irq) / 1000);
+    delete(@last_irq);
+  }
+
+  if (@last_sock_readable) {
+    @sock_readable_to_epoll_us = hist((nsecs - @last_sock_readable) / 1000);
+    @sock_readable_to_epoll_avg_us = avg((nsecs - @last_sock_readable) / 1000);
+    @sock_readable_to_epoll_max_us = max((nsecs - @last_sock_readable) / 1000);
+    delete(@last_sock_readable);
+  }
+
+  @epoll_ret[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_epoll_pwait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_seen = count();
+
+  if (@last_irq) {
+    @irq_to_epoll_us = hist((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_avg_us = avg((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_max_us = max((nsecs - @last_irq) / 1000);
+    delete(@last_irq);
+  }
+
+  if (@last_sock_readable) {
+    @sock_readable_to_epoll_us = hist((nsecs - @last_sock_readable) / 1000);
+    @sock_readable_to_epoll_avg_us = avg((nsecs - @last_sock_readable) / 1000);
+    @sock_readable_to_epoll_max_us = max((nsecs - @last_sock_readable) / 1000);
+    delete(@last_sock_readable);
+  }
+
+  @epoll_ret[tid] = nsecs;
+}
+
+/* epoll return -> read enter */
+tracepoint:syscalls:sys_enter_read
+/pid == $1 && @epoll_ret[tid]/
+{
+  @epoll_to_read_us = hist((nsecs - @epoll_ret[tid]) / 1000);
+  @read_start[tid] = nsecs;
+  delete(@epoll_ret[tid]);
+}
+
+/* read syscall duration */
+tracepoint:syscalls:sys_exit_read
+/pid == $1 && @read_start[tid]/
+{
+  @read_us = hist((nsecs - @read_start[tid]) / 1000);
+  @read_exit[tid] = nsecs;
+  delete(@read_start[tid]);
+}
+
+/* read exit -> openat enter = parser/router/user-space work */
+tracepoint:syscalls:sys_enter_openat
+/pid == $1 && @read_exit[tid]/
+{
+  @read_to_openat_us = hist((nsecs - @read_exit[tid]) / 1000);
+  @openat_start[tid] = nsecs;
+  delete(@read_exit[tid]);
+}
+
+/* openat duration */
+tracepoint:syscalls:sys_exit_openat
+/pid == $1 && @openat_start[tid]/
+{
+  @openat_us = hist((nsecs - @openat_start[tid]) / 1000);
+  @openat_exit[tid] = nsecs;
+  delete(@openat_start[tid]);
+}
+
+/* openat exit -> fstat enter */
+tracepoint:syscalls:sys_enter_newfstatat
+/pid == $1 && @openat_exit[tid]/
+{
+  @openat_to_fstat_us = hist((nsecs - @openat_exit[tid]) / 1000);
+  @fstat_start[tid] = nsecs;
+  delete(@openat_exit[tid]);
+}
+
+/* fstat duration */
+tracepoint:syscalls:sys_exit_newfstatat
+/pid == $1 && @fstat_start[tid]/
+{
+  @fstat_us = hist((nsecs - @fstat_start[tid]) / 1000);
+  @fstat_exit[tid] = nsecs;
+  delete(@fstat_start[tid]);
+}
+
+/* fstat exit -> sendfile enter */
+tracepoint:syscalls:sys_enter_sendfile64
+/pid == $1 && @fstat_exit[tid]/
+{
+  @fstat_to_sendfile_us = hist((nsecs - @fstat_exit[tid]) / 1000);
+
+  @sendfile_start[tid] = nsecs;
+
+  /*
+   * Global timestamp for TX tracepoints.
+   * Approximate, but works well for single worker / low background traffic.
+   */
+  @last_sendfile_tx = nsecs;
+  @sendfile_seen = count();
+
+  delete(@fstat_exit[tid]);
+}
+
+/* sendfile duration */
+tracepoint:syscalls:sys_exit_sendfile64
+/pid == $1 && @sendfile_start[tid]/
+{
+  @sendfile_us = hist((nsecs - @sendfile_start[tid]) / 1000);
+  @sendfile_exit[tid] = nsecs;
+  delete(@sendfile_start[tid]);
+}
+
+/*
+ * TX TCP path:
+ * sendfile enter -> TCP transmit machinery
+ */
+
+kprobe:tcp_write_xmit
+/@last_sendfile_tx/
+{
+  @sendfile_to_tcp_write_xmit_us = hist((nsecs - @last_sendfile_tx) / 1000);
+  @tcp_write_xmit_seen = count();
+}
+
+/*
+ * Server transmit path:
+ * sendfile enter -> network device queue / driver transmit path
+ */
+
+tracepoint:net:net_dev_queue
+/@last_sendfile_tx/
+{
+  @sendfile_to_netdev_queue_us = hist((nsecs - @last_sendfile_tx) / 1000);
+}
+
+tracepoint:net:net_dev_start_xmit
+/@last_sendfile_tx/
+{
+  @sendfile_to_netdev_start_xmit_us = hist((nsecs - @last_sendfile_tx) / 1000);
+}
+
+tracepoint:net:net_dev_xmit
+/@last_sendfile_tx/
+{
+  @sendfile_to_netdev_xmit_us = hist((nsecs - @last_sendfile_tx) / 1000);
+  delete(@last_sendfile_tx);
+}
+
+interval:s:10
+{
+  printf("\n=== full server-side latency breakdown with TCP split, cumulative ===\n");
+
+  printf("\nNIC IRQs seen:\n");
+  print(@irq_seen);
+
+  printf("\nepoll wakeups seen:\n");
+  print(@epoll_seen);
+
+  printf("\n[1] NIC IRQ -> epoll return:\n");
+  print(@irq_to_epoll_us);
+  print(@irq_to_epoll_avg_us);
+  print(@irq_to_epoll_max_us);
+
+  printf("\n[2] epoll return -> read enter:\n");
+  print(@epoll_to_read_us);
+
+  printf("\n[3] read syscall duration:\n");
+  print(@read_us);
+
+  printf("\n[4] read exit -> openat enter, user parse/path work:\n");
+  print(@read_to_openat_us);
+
+  printf("\n[5] openat duration:\n");
+  print(@openat_us);
+
+  printf("\n[6] openat exit -> fstat enter:\n");
+  print(@openat_to_fstat_us);
+
+  printf("\n[7] fstat duration:\n");
+  print(@fstat_us);
+
+  printf("\n[8] fstat exit -> sendfile enter:\n");
+  print(@fstat_to_sendfile_us);
+
+  printf("\n[9] sendfile syscall duration:\n");
+  print(@sendfile_us);
+
+  printf("\n[10] sendfile calls seen for TX correlation:\n");
+  print(@sendfile_seen);
+
+  printf("\n[11] sendfile enter -> net_dev_queue:\n");
+  print(@sendfile_to_netdev_queue_us);
+
+  printf("\n[12] sendfile enter -> net_dev_start_xmit:\n");
+  print(@sendfile_to_netdev_start_xmit_us);
+
+  printf("\n[13] sendfile enter -> net_dev_xmit:\n");
+  print(@sendfile_to_netdev_xmit_us);
+
+  printf("\n[14] TCP RX count, tcp_v4_rcv seen:\n");
+  print(@tcp_v4_rcv_seen);
+
+  printf("\n[15] TCP RX stack: tcp_v4_rcv -> sock_def_readable:\n");
+  print(@tcp_rx_to_sock_readable_us);
+  print(@tcp_rx_to_sock_readable_avg_us);
+  print(@tcp_rx_to_sock_readable_max_us);
+
+  printf("\n[16] socket readable count:\n");
+  print(@sock_readable_seen);
+
+  printf("\n[17] socket readable -> epoll return, wakeup/scheduler:\n");
+  print(@sock_readable_to_epoll_us);
+  print(@sock_readable_to_epoll_avg_us);
+  print(@sock_readable_to_epoll_max_us);
+
+  printf("\n[18] TCP TX count, tcp_write_xmit seen:\n");
+  print(@tcp_write_xmit_seen);
+
+  printf("\n[19] TX TCP entry: sendfile enter -> tcp_write_xmit:\n");
+  print(@sendfile_to_tcp_write_xmit_us);
+}

@@ -31,6 +31,7 @@ typedef struct {
   const char *doc_root;        // "./public"
   int workers;                 // e.g., 4
   int listen_fd;               // created in master before fork
+  int control_fd;
 } forge_cfg_t;
 
 typedef struct {
@@ -45,6 +46,8 @@ extern atomic_bool g_terminate;
 /* net.c */
 int  forge_create_listener(const char *hostport);
 int  forge_set_nonblock(int fd);
+int forge_send_fd(int sock, int fd_to_send);
+int forge_recv_fd(int sock);
 
 /* master.c */
 void forge_install_signals(void);

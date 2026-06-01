@@ -1,0 +1,42 @@
+tracepoint:irq:irq_handler_entry
+/str(args->name) == "enp2s0"/
+{
+  @last_irq = nsecs;
+  @irq_seen = count();
+}
+
+tracepoint:syscalls:sys_exit_epoll_wait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_seen = count();
+
+  if (@last_irq) {
+    @irq_to_epoll_us = hist((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_avg_us = avg((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_max_us = max((nsecs - @last_irq) / 1000);
+    delete(@last_irq);
+  }
+}
+
+tracepoint:syscalls:sys_exit_epoll_pwait
+/pid == $1 && args->ret > 0/
+{
+  @epoll_seen = count();
+
+  if (@last_irq) {
+    @irq_to_epoll_us = hist((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_avg_us = avg((nsecs - @last_irq) / 1000);
+    @irq_to_epoll_max_us = max((nsecs - @last_irq) / 1000);
+    delete(@last_irq);
+  }
+}
+
+interval:s:10
+{
+  printf("\n=== cumulative IRQ -> epoll results, every 10s ===\n");
+  print(@irq_seen);
+  print(@epoll_seen);
+  print(@irq_to_epoll_us);
+  print(@irq_to_epoll_avg_us);
+  print(@irq_to_epoll_max_us);
+}
