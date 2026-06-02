@@ -1,12 +1,12 @@
 # Minimal C Web Server
 
-This repo implements an **event loop based** HTTP/1.1 static web server in **C**. The server is closed loop benchmarked over ethernet (1000Mbps) using wrk. Latency/Throughput curves are plotted against file sizes/number of connections/number of server workers. Attempts are made to explain the results by using perf, and bpftrace.
+This repo implements an **event loop based** HTTP/1.1 static web server in **C** and closed loop benchmarks it over ethernet (1000Mbps) using wrk. Latency/Throughput curves are plotted against number of connections/concurrency and file sizes. Optimizations: Spinning epoll_wait, TCP_CORK are implemented. Max throughput obtained was 90k rps, 0.5ms p99. Effects of optimizations are studied via latency breakdown and performance statistics using perf, and bpftrace. Future work could identify source of queueing/bottleneck possibly through open loop benchmarking.
 
 ## Setup
 
 Server and client on separate laptops connected via 1000Mbps ethernet cable.
 ### Server
-- **Master + workers:** a master process with multiple workers. Master accepts connections and round robin dispatches to workers.
+- **Master + workers:** a master process with multiple workers. Master accepts connections and round robin dispatches to workers. Worker process CPU affinity set to non SMT siblings.
 - **I/O model:** each worker runs a non-blocking **epoll** event loop and registers non-blocking client TCP sockets.
 - **Serving static files:** on HTTP GET requests, files are opened, verified, and streamed with **`sendfile()`**.
 - **Optimizations:** 
@@ -20,16 +20,13 @@ Patched/modified `wrk` is used for generating load.
 
 This behaviour has been discussed by other members such as [upstream wrk issue #485](https://github.com/wg/wrk/issues/485) and [issue #438](https://github.com/wg/wrk/issues/438), which questions the correctness of wrk's coordinated-omission compensation.
 
-
 ## Benchmarking
-Forge is benchmarked with patched/modified `wrk` over ethernet. **RPS** and **latency** statistics against response payload file size in a **closed-loop** setup is provided.
+Forge is benchmarked with patched/modified `wrk` over ethernet. 
 
-<p align="center">
-  <b>Scaling Server workers wrt number of connections</b>
-</p>
-<p align="center">
-  <img src="perf/READMEPlots/worker_scaling.png" alt="Throughput vs client concurrency with worker scaling" width="750"/>
-</p>
+We first study single client connection, single server worker. We compare busy waiting vs without. Then we keep busy polling and scale concurrent connections and server workers.
+
+### Single client connection, single server worker. 
+
 <p align="center">
   <b>Single Connection Latency/Throughput vs File Size</b>
 </p>
@@ -40,8 +37,8 @@ Forge is benchmarked with patched/modified `wrk` over ethernet. **RPS** and **la
   <img src="perf/READMEPlots/latency.png" alt="Latency vs payload size" width="750"/>
 </p>
 
-
-
+As file size increases, work per request for file increases, hence latency increases and throughput decreases.
+Busy waiting improves performance. Especially for small files. For 1KB, (latency, throughput): (158us, 6.1k) -> (94us, 10.4k). However, streaming latency dwarfs gains due to busy waiting for larger sizes. Numerical values are provided below.
 
 | file_size_bytes | RPS TCP_CORK only | RPS optimized | avg latency TCP_CORK only ms | avg latency optimized ms | p99 latency TCP_CORK only ms | p99 latency optimized ms |
 | --------------- | ----------------- | ------------- | ---------------------------- | ------------------------ | ---------------------------- | ------------------------ |
@@ -56,35 +53,24 @@ Forge is benchmarked with patched/modified `wrk` over ethernet. **RPS** and **la
 | 262,144         | 377.03            | 402.96        | 2.640                        | 2.480                    | 2.880                        | 2.480                    |
 | 524,288         | 207.12            | 214.86        | 4.820                        | 4.650                    | 4.960                        | 4.730                    |
 | 1,048,576       | 106.36            | 109.60        | 9.390                        | 9.120                    | 9.600                        | 9.170                    |
+### Scaling client connections and server workers
+We scale number of open client connections and server workers and study effect on throughput.
 
-### Why does busy-wait reduce latency? Perf stat comparison: TCP_CORK only vs busy-wait optimized
+<p align="center">
+  <img src="perf/READMEPlots/worker_scaling.png" alt="Throughput vs client concurrency with worker scaling" width="750"/>
+</p>
+As number of concurrent connections increase, server interleaves connection work, leading to throughput increase. When interleaving capacity exhausts, throughput plateaus. Corresponding latency curves below are consistent with this. Latency gradually increases with concurrency as server trades off per connection latency for overall throughput increase. When server exhausts interleaving capacity, requsts from increasing concurrency adds itself to queues with minimal interleaving. This rapidly increases per request latency as requests now wait for their turn in queues.
+<p align="center">
+  <img src="perf/thread4/rps_p99_vs_concurrency.png" alt="Throughput vs client concurrency for 1 server worker" width="400"/>
+</p>
+Above plot is available at `perf/thread4/rps_p99_vs_concurrency.png` and corresponds to 4 server workers.
 
-The following `perf stat` runs compare the **TCP_CORK only** version against the **busy-wait optimized** version under load. Busy wait keeps the CPU hot. However, the validity of cache miss rate to explain higher performance is not clear as it maybe high because busy wait spins on the same instruction. Raw output available in perf/perf_stat.txt
+## Optimization Effects
+We study effects of `busy waiting` by analyzing individual latencies of various stages of hot path. We compare it with `TCP_CORK only` We also compare performance statistics.
 
-| metric | TCP_CORK only | busy-wait optimized |
-| ------ | ------------: | ------------------: |
-| task-clock | 8,117.39 ms | 15,065.26 ms |
-| CPU utilized | 0.406 CPUs | 0.753 CPUs |
-| context switches | 84,811 | 1,295 |
-| context switches/sec | 10.448 K/sec | 85.959/sec |
-| CPU migrations | 63 | 16 |
-| cycles | 9,282,320,000 | 63,948,513,609 |
-| avg CPU freq | 1.144 GHz | 4.245 GHz |
-| instructions | 5,670,914,664 | 46,043,241,323 |
-| IPC | 0.61 | 0.72 |
-| branches | 1,154,591,156 | 10,199,490,034 |
-| branch misses | 129,232,604 | 1,249,311,334 |
-| branch miss rate | 11.19% | 12.25% |
-| cache references | 883,273,385 | 1,180,240,128 |
-| cache misses | 282,649,329 | 68,813,051 |
-| cache miss rate | 32.00% | 5.83% |
-| dTLB load misses | 994,791 | 508,439 |
-| iTLB load misses | 91,043 | 107,044 |
-| elapsed time | 20.003 s | 20.003 s |
+### Where does latency reduce? Latency breakdown and comparison
 
-### Where does latency reduce? Busy-wait vs TCP_CORK-only latency breakdown
-
-Below is the latency breakdown of the receive-send path. Busy wait reduced the individual latencies. Please note that tracing introduced significant latency. Hence the values here can be used to compare busy-wait and naive but not to explain latency values in above results. Raw histograms are available in perf/bpftrace_syscalls_duration.txt.
+Below is the latency breakdown of the receive-send path. NIC IRQ to tcp_write_xmit. Busy wait reduced the individual latencies. Please note that tracing introduced significant latency. Hence the values here can be used to compare busy-wait and naive but not to explain latency values in above plots and tables. Raw histograms are available in perf/bpftrace_syscalls_duration.txt.
 
 | # | stage | TCP_CORK only | busy-wait optimized | what changed |
 |---:|---|---|---|---|
@@ -107,6 +93,35 @@ Below is the latency breakdown of the receive-send path. Busy wait reduced the i
 | 17 | socket readable → epoll return | Mostly 8–32 µs; avg 20 µs; max 3421 µs | Mostly 4–8 µs; avg 8 µs; max 79 µs | Main evidence: scheduler/wakeup tail latency collapsed. |
 | 18 | tcp_write_xmit seen | 142,739 | 203,388 | Busy-wait run observed more TCP transmit calls. |
 | 19 | sendfile enter → tcp_write_xmit | Spread across 2–32 µs | Mostly 2–16 µs | TCP transmit entry became tighter, but still has two modes around 2–4 µs and 8–16 µs. |
+
+Overall, busy wait reduces many stages of request.
+
+### Why does busy-wait reduce latency? Perf stat comparison.
+We run perf stat on single server worker.
+| metric | TCP_CORK only | busy-wait optimized |
+| ------ | ------------: | ------------------: |
+| task-clock | 8,117.39 ms | 15,065.26 ms |
+| CPU utilized | 0.406 CPUs | 0.753 CPUs |
+| context switches | 84,811 | 1,295 |
+| context switches/sec | 10.448 K/sec | 85.959/sec |
+| CPU migrations | 63 | 16 |
+| cycles | 9,282,320,000 | 63,948,513,609 |
+| avg CPU freq | 1.144 GHz | 4.245 GHz |
+| instructions | 5,670,914,664 | 46,043,241,323 |
+| IPC | 0.61 | 0.72 |
+| branches | 1,154,591,156 | 10,199,490,034 |
+| branch misses | 129,232,604 | 1,249,311,334 |
+| branch miss rate | 11.19% | 12.25% |
+| cache references | 883,273,385 | 1,180,240,128 |
+| cache misses | 282,649,329 | 68,813,051 |
+| cache miss rate | 32.00% | 5.83% |
+| dTLB load misses | 994,791 | 508,439 |
+| iTLB load misses | 91,043 | 107,044 |
+| elapsed time | 20.003 s | 20.003 s |
+
+The following `perf stat` suggests that busy wait keeps the CPU hot. Task-clock and utlization doubling is because of CPU spinning. Context switches dropped 84x because no sleeping/transition to idle. Higher cycles and GHz due to spinning.
+
+However, the validity of cache miss rate to explain higher performance is not clear as it maybe high because busy wait spins on the same instruction. Raw output available in perf/perf_stat.txt
 
 ## Future Work
 
