@@ -1,6 +1,6 @@
 # Minimal C Web Server
 
-This repo implements an **event loop based** HTTP/1.1 static web server in **C** and closed loop benchmarks it over ethernet (1000Mbps) using wrk. Latency/Throughput curves are plotted against number of connections/concurrency and file sizes. Optimizations: Spinning epoll_wait, TCP_CORK are implemented. Max throughput obtained was 90k rps, 0.5ms p99. Effects of optimizations are studied via latency breakdown and performance statistics using perf, and bpftrace. Future work could identify source of queueing/bottleneck possibly through open loop benchmarking.
+This repo implements an **event loop based** HTTP/1.1 static web server in **C** and closed loop benchmarks it over ethernet (1000Mbps) using wrk. Latency/Throughput curves are plotted against number of connections/concurrency and file sizes. Optimizations: Spinning epoll_wait, TCP_CORK are implemented. Max throughput obtained was 90k rps, 0.5ms p99. Effects of optimizations are studied via latency breakdown using bpftrace. Future work could identify source of queueing/bottleneck possibly through open loop benchmarking.
 
 ## Setup
 
@@ -60,13 +60,15 @@ We scale number of open client connections and server workers and study effect o
   <img src="perf/READMEPlots/worker_scaling.png" alt="Throughput vs client concurrency with worker scaling" width="750"/>
 </p>
 As number of concurrent connections increase, server interleaves connection work, leading to throughput increase. When interleaving capacity exhausts, throughput plateaus. Corresponding latency curves below are consistent with this. Latency gradually increases with concurrency as server trades off per connection latency for overall throughput increase. When server exhausts interleaving capacity, requsts from increasing concurrency adds itself to queues with minimal interleaving. This rapidly increases per request latency as requests now wait for their turn in queues.
+
+In later experiments, it was observed that the latency for concurrency 2,4.. is same as its busy-waiting version. The exact reason is not known.
 <p align="center">
   <img src="perf/thread4/rps_p99_vs_concurrency.png" alt="Throughput vs client concurrency for 1 server worker" width="400"/>
 </p>
 Above plot is available at `perf/thread4/rps_p99_vs_concurrency.png` and corresponds to 4 server workers.
 
 ## Optimization Effects
-We study effects of `busy waiting` by analyzing individual latencies of various stages of hot path. We compare it with `TCP_CORK only` We also compare performance statistics.
+We study effects of `busy waiting` by analyzing individual latencies of various stages of hot path. We compare it with `TCP_CORK only`.
 
 ### Where does latency reduce? Latency breakdown and comparison
 
@@ -94,34 +96,7 @@ Below is the latency breakdown of the receive-send path. NIC IRQ to tcp_write_xm
 | 18 | tcp_write_xmit seen | 142,739 | 203,388 | Busy-wait run observed more TCP transmit calls. |
 | 19 | sendfile enter → tcp_write_xmit | Spread across 2–32 µs | Mostly 2–16 µs | TCP transmit entry became tighter, but still has two modes around 2–4 µs and 8–16 µs. |
 
-Overall, busy wait reduces many stages of request.
-
-### Why does busy-wait reduce latency? Perf stat comparison.
-We run perf stat on single server worker.
-| metric | TCP_CORK only | busy-wait optimized |
-| ------ | ------------: | ------------------: |
-| task-clock | 8,117.39 ms | 15,065.26 ms |
-| CPU utilized | 0.406 CPUs | 0.753 CPUs |
-| context switches | 84,811 | 1,295 |
-| context switches/sec | 10.448 K/sec | 85.959/sec |
-| CPU migrations | 63 | 16 |
-| cycles | 9,282,320,000 | 63,948,513,609 |
-| avg CPU freq | 1.144 GHz | 4.245 GHz |
-| instructions | 5,670,914,664 | 46,043,241,323 |
-| IPC | 0.61 | 0.72 |
-| branches | 1,154,591,156 | 10,199,490,034 |
-| branch misses | 129,232,604 | 1,249,311,334 |
-| branch miss rate | 11.19% | 12.25% |
-| cache references | 883,273,385 | 1,180,240,128 |
-| cache misses | 282,649,329 | 68,813,051 |
-| cache miss rate | 32.00% | 5.83% |
-| dTLB load misses | 994,791 | 508,439 |
-| iTLB load misses | 91,043 | 107,044 |
-| elapsed time | 20.003 s | 20.003 s |
-
-The following `perf stat` suggests that busy wait keeps the CPU hot. Task-clock and utlization doubling is because of CPU spinning. Context switches dropped 84x because no sleeping/transition to idle. Higher cycles and GHz due to spinning.
-
-However, the validity of cache miss rate to explain higher performance is not clear as it maybe high because busy wait spins on the same instruction. Raw output available in perf/perf_stat.txt
+Overall, busy wait reduces many stages of request. However, it is not clear why the latencies changed. 
 
 ## Future Work
 
